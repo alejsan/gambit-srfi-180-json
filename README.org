@@ -1,0 +1,51 @@
+An implementation of [[https://srfi.schemers.org/srfi-180/][SRFI 180]]: JSON for [[http://www.gambitscheme.org/][gambit]].
+
+* TODO
+
+- json-lines-read and json-sequence-read not yet implemented
+- Writing json is not yet implemented
+- json-nesting-depth-limit and json-number-of-character-limit are not being
+  checked (should be trivial to add)
+- Use gambit specific unsafe primitives where ever possible
+
+* Tests
+
+The json files used for testing are from [[https://github.com/nst/JSONTestSuite/][JSONTestSuite]].
+
+* Implementation Notes
+
+** Encoding
+
+If the contents of the supplied input port cannot be decoded, in the specified
+encoding, a json-error is raised.
+
+The test suite is run using UTF-8 encoding for every test file.
+
+** Byte order mark
+
+Currently there is no special handling for a leading byte order mark, so it
+triggers an error. Unless the port's encoding is set to UTF-16 in which case
+gambit's read/peek-char interprets the byte order mark (and configures the port
+accordingly) without emitting the BOM.
+
+** Unpaired surrogates
+
+Gambit strings cannot contain unpaired surrogates so we raise a json-error when
+encountered.
+
+Maybe there is a way ?
+
+** Very large numbers
+
+Some valid inputs may cause gambit to attempt to produce a very large bignum
+possibly using all available memory. The test data includes one such file:
+"i_number_huge_exp.json" (the test case is commented out).
+
+Should there be a way to mitigate this risk?
+
+* Some tests cases can crash my emacs
+
+Opening the file "y_string_unicode_2.json" causes my emacs (only in graphical
+mode not terminal) to segfault. :(
+
+Also the unescaped unicode sequence in "y_string_unicode_U+FDD0_nonchar.json"
