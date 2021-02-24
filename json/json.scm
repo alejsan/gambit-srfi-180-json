@@ -103,6 +103,31 @@
 				 x)
 			       (port-or-generator)))))))
 
+  ;; Input is position on first non-whitespace character or eof
+(define (skip-json-whitespace peek get)
+  (let loop ((x (peek)))
+    (when (and (char? x) (json-char-whitespace? x))
+      (get)
+      (loop (peek)))))
+
+;; read characters from the input accumulating them into a string until
+;; encountering a delimiter (or eof). Returns the string. Does not consume the
+;; delimiter.
+(define (read-until-delimiter peek get)
+  (with-output-to-string
+    (lambda ()
+      (let loop ((x (peek)))
+	(unless (or (eof-object? x) (json-char-delimiter? x))
+	  (write-char (get))
+	  (loop (peek)))))))
+
+(define (read-json-literal peek get)
+  (case (string->symbol (read-until-delimiter peek get))
+    ((false) #f)
+    ((true) #t)
+    ((null) 'null)
+    (else (json-error "invalid json syntax, unrecognized literal"))))
+
 (define (read-json-number peek get)
 
   (define (write-ascii-digit ch)
@@ -245,32 +270,8 @@
 	       (loop (get))))))))
 
 (define (make-json-token-generator peek get)
-
-  (define (skip-whitespace)
-    (let loop ()
-      (let ((in (peek)))
-	(when (and (char? in) (json-char-whitespace? in))
-	  (get)
-	  (loop)))))
-
-  (define (read-until-delimiter)
-    (with-output-to-string
-      (lambda ()
-	(let loop ()
-	  (let ((in (peek)))
-	    (unless (or (eof-object? in) (json-char-delimiter? in))
-	      (write-char (get))
-	      (loop)))))))
-
-  (define (get-token/literal)
-    (case (string->symbol (read-until-delimiter))
-      ((false) #f)
-      ((true) #t)
-      ((null) 'null)
-      (else (json-error "invalid json syntax, unrecognized literal"))))
-
   (lambda ()
-    (let ((in (begin (skip-whitespace) (peek))))
+    (let ((in (begin (skip-json-whitespace peek get) (peek))))
       (if (eof-object? in)
 	  in
 	  (case in
@@ -281,7 +282,7 @@
 	    ((#\:) (get) 'name-seperator)
 	    ((#\,) (get) 'value-seperator)
 	    ((#\") (read-json-string peek get))
-	    ((#\t #\f #\n) (get-token/literal))
+	    ((#\t #\f #\n) (read-json-literal peek get))
 	    ((#\-) (read-json-number peek get))
 	    (else
 	     (if (digit0-9? in)
