@@ -294,22 +294,20 @@
 
   (define depth 0)
 
-  (define *stack* '())
-
-  (define (stack-empty?) (null? *stack*))
-
-  (define (stack-top) (car *stack*))
+  (define stack '())
 
   (define (stack-pop!)
-    (let ((x (car *stack*)))
+    (let ((x (car stack)))
       (set! depth (- depth 1))
-      (set! *stack* (cdr *stack*))
+      (set! stack (cdr stack))
+      (set! require-comma? #t)
       x))
 
   (define (stack-push! x)
     ;; TODO check depth limit
     (set! depth (+ depth 1))
-    (set! *stack* (cons x *stack*)))
+    (set! stack (cons x stack))
+    (set! require-comma? #f))
 
   (define generator-first-use? #t)
   
@@ -322,12 +320,10 @@
       ((#\[)
        (get)
        (stack-push! 'array)
-       (set! require-comma? #f)
        'array-start)
       ((#\{)
        (get)
        (stack-push! 'object)
-       (set! require-comma? #f)
        'object-start)
       (else (read-json-scalar peek get))))
 
@@ -341,10 +337,10 @@
 	  (eof-object)
 	  (read-json-scalar-or-enter-non-scalar)))
      
-     ((stack-empty?)
+     ((null? stack)
       (eof-object))
      
-     ((eq? 'array (stack-top))
+     ((eq? 'array (car stack))
       (skip-json-whitespace peek get)
       (let ((x (peek)))
 	(cond ((eof-object? x)
@@ -352,7 +348,6 @@
 	      ((eq? x #\])
 	       (get)
 	       (stack-pop!)
-	       (set! require-comma? #t)
 	       'array-end)
 	      (else
 	       (if require-comma?
@@ -362,7 +357,8 @@
 		   (set! require-comma? #t))
 	       (read-json-scalar-or-enter-non-scalar)))))
 
-     (else ; stack-top = object
+     ;; stack-top = object
+     (else
       (skip-json-whitespace peek get)
       (let ((x (peek)))
 	(cond ((eof-object? x)
@@ -377,7 +373,6 @@
 	      ((eq? x #\})
 	       (get)
 	       (stack-pop!)
-	       (set! require-comma? #t)
 	       'object-end)
 	      (else
 	       (let ((x (if require-comma?
