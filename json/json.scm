@@ -269,192 +269,131 @@
 	       (write-char in)
 	       (loop (get))))))))
 
-(define (make-json-token-generator peek get)
-  (lambda ()
-    (let ((in (begin (skip-json-whitespace peek get) (peek))))
-      (if (eof-object? in)
-	  in
-	  (case in
-	    ((#\[) (get) 'array-start)
-	    ((#\]) (get) 'array-end)
-	    ((#\{) (get) 'object-start)
-	    ((#\}) (get) 'object-end)
-	    ((#\:) (get) 'name-seperator)
-	    ((#\,) (get) 'value-seperator)
-	    ((#\") (read-json-string peek get))
-	    ((#\t #\f #\n) (read-json-literal peek get))
-	    ((#\-) (read-json-number peek get))
-	    (else
-	     (if (digit0-9? in)
-		 (read-json-number peek get)
-		 (json-error "Unexpected character" in))))))))
+(define (read-json-scalar peek get)
+  (let ((x (peek)))
+    (case x
+      ((#\") (read-json-string peek get))
+      ((#\t #\f #\n) (read-json-literal peek get))
+      ((#\-) (read-json-number peek get))
+      (else
+       (cond ((eof-object? x)
+	      (json-error "Unexpected 'eof'"))
+	     ((digit0-9? x)
+	      (read-json-number peek get))
+	     (else
+	      (json-error (string-append "Unexpected character '" (string x) "'"))))))))
 
-;; any token that is not ':' ',' ']' or '}'
-(define (value-token? tk)
-  (and (not (eof-object? tk))
-       (or (not (symbol? tk))
-	   (memq tk '(null array-start object-start)))))
+(define (make-json-generator peek get)
 
-(define (token->string tk)
-  (cond ((symbol? tk)
-	 (case tk
-	   ((array-start) "[")
-	   ((array-end)   "]")
-	   ((object-start) "{")
-	   ((object-end)   "}")
-	   ((name-seperator) ":")
-	   ((value-seperator) ",")
-	   ((null) "null")
-	   (else (error "token->string unknown token" tk))))
-	((string? tk) tk)
-	((number? tk) (number->string tk))
-	((eq? tk #t) "true")
-	((eq? tk #f) "false")
-	((eof-object? tk) "eof")
-	(else (error "token->string unknown token" tk))))
-
-(define (json-unexpected-token-error tk)
-  (json-error (string-append "Unexpected '" (token->string tk) "'")))
-
-(define (make-json-generator tgen)
-
-  #;
-  (define (tgen)
-    (let ((tk (tgen*)))
-      (display "TOKEN: " ##stdout-port) (write tk ##stdout-port)
-      ;; (display " " ##stdout-port)
-      ;; (write *context* ##stdout-port)
-      (newline ##stdout-port)
-      tk))
-  
   (define depth 0)
 
-  (define (depth-inc! n)
-    ;; TODO check the depth limit
-    (set! depth (+ depth n)))
+  (define *stack* '())
 
-  (define *context* '(init eof))
+  (define (stack-empty?) (null? *stack*))
 
-  (define (current-context) (car *context*))
+  (define (stack-top) (car *stack*))
 
-  (define (context-pop!)
-    (let ((x (car *context*)))
-      (set! *context* (cdr *context*))
+  (define (stack-pop!)
+    (let ((x (car *stack*)))
+      (set! depth (- depth 1))
+      (set! *stack* (cdr *stack*))
       x))
 
-  (define (context-push! sym)
-    (set! *context* (cons sym *context*)))
+  (define (stack-push! x)
+    ;; TODO check depth limit
+    (set! depth (+ depth 1))
+    (set! *stack* (cons x *stack*)))
 
-  (define (maybe-enter! tk)
-    (case tk
-      ((array-start) (context-push! 'array-start) (depth-inc! 1))
-      ((object-start) (context-push! 'object-start) (depth-inc! 1))))
+  (define generator-first-use? #t)
+  
+  (define require-comma? #f)
+
+  (define require-colon? #f)
+
+  (define (read-json-scalar-or-enter-non-scalar)
+    (case (peek)
+      ((#\[)
+       (get)
+       (stack-push! 'array)
+       (set! require-comma? #f)
+       'array-start)
+      ((#\{)
+       (get)
+       (stack-push! 'object)
+       (set! require-comma? #f)
+       'object-start)
+      (else (read-json-scalar peek get))))
 
   (lambda ()
+    (cond
+     
+     (generator-first-use?
+      (set! generator-first-use? #f)
+      (skip-json-whitespace peek get)
+      (if (eof-object? (peek))
+	  (eof-object)
+	  (read-json-scalar-or-enter-non-scalar)))
+     
+     ((stack-empty?)
+      (eof-object))
+     
+     ((eq? 'array (stack-top))
+      (skip-json-whitespace peek get)
+      (let ((x (peek)))
+	(cond ((eof-object? x)
+	       (json-error "Unexpected 'eof'"))
+	      ((eq? x #\])
+	       (get)
+	       (stack-pop!)
+	       (set! require-comma? #t)
+	       'array-end)
+	      (else
+	       (if require-comma?
+		   (if (eq? x #\,)
+		       (begin (get) (skip-json-whitespace peek get))
+		       (json-error "Missing ',' between array elements"))
+		   (set! require-comma? #t))
+	       (read-json-scalar-or-enter-non-scalar)))))
 
-    #;
-    (begin (newline ##stdout-port)
-	   (display "CONTEXT: " ##stdout-port)
-	   (write *context* ##stdout-port)
-	   (newline ##stdout-port))
-    
-    (case (current-context)
-      
-      ((eof)
-       (eof-object))
-      
-      ((init)
-       (context-pop!)
-       (let ((tk (tgen)))
-	 (cond ((eof-object? tk) tk)
-	       ((value-token? tk)
-		(maybe-enter! tk)
-		tk)
-	       (else
-		(json-error
-		 (string-append "invalid json syntax, unexpected '" (token->string tk) "'"))))))
-      
-      ((array-start)
-       (context-pop!)
-       (let ((tk (tgen)))
-	 (cond ((value-token? tk)
-		(context-push! 'array-body)
-		(maybe-enter! tk)
-		tk)
-	       ((eq? tk 'array-end)
-		tk)
-	       (else (json-error
-		      (string-append "invalid json syntax, unexpected '" (token->string tk) "'"))))))
-      
-      ((array-body)
-       (let ((tk (tgen)))
-	 (case tk
-	   ((value-seperator)
-	    (let ((tk (tgen)))
-	      (cond ((value-token? tk)
-		     (maybe-enter! tk)
-		     tk)
-		    (else (json-error
-			   (string-append "invalid json syntax, unexpected '" (token->string tk) "'"))))))
-	   ((array-end)
-	    (context-pop!)
-	    (depth-inc! -1)
-	    tk)
-	   ((object-end)
-	    (json-error "invalid json syntax, unexpected '}'"))
-	   (else
-	    (json-error "invalid json syntax, missing ',' between array elements")))))
-
-      ((object-start)
-       (context-pop!)
-       (let ((tk (tgen)))
-	 (cond ((string? tk)
-		(context-push! 'object-member-value)
-		tk)
-	       ((eq? tk 'object-end)
-		(depth-inc! -1)
-		tk)
-	       (else (json-error "invalid json syntax, expected object member name")))))
-
-      ((object-member-value)
-       (context-pop!)
-       (case (tgen)
-	 ((name-seperator)
-	  (let ((tk (tgen)))
-	    (cond ((value-token? tk)
-		   (context-push! 'object-body)
-		   (maybe-enter! tk)
-		   tk)
-		  (else (json-error
-			 (string-append "invalid json syntax, unexpected '" (token->string tk) "'"))))))
-	 (else
-	  (json-error "invalid json syntax, missing ':'"))))
-
-      ((object-body)
-       (let ((tk (tgen)))
-	 (case tk
-	   ((value-seperator)
-	    (let ((tk (tgen)))
-	      (cond ((string? tk)
-		     (context-pop!)
-		     (context-push! 'object-member-value)
-		     tk)
-		    (else
-		     (json-error "invalid json syntax, expected object member name")))))
-	   ((object-end)
-	    (context-pop!)
-	    (depth-inc! -1)
-	    tk)
-	   (else
-	    (if (value-token? tk)
-		(json-error "invalid json syntax, missing ',' between object members")
-		(json-unexpected-token-error tk)))))))))
-
+     (else ; stack-top = object
+      (skip-json-whitespace peek get)
+      (let ((x (peek)))
+	(cond ((eof-object? x)
+	       (json-error "Unexpected 'eof'"))
+	      ((eq? x #\})
+	       (if require-colon?
+		   (json-error "Unmatched object key, expected ':'")
+		   (begin (get)
+			  (stack-pop!)
+			  (set! require-comma? #t)
+			  'object-end)))
+	      (require-colon?
+	       (if (eq? x #\:)
+		   (begin (get)
+			  (set! require-colon? #f)
+			  (skip-json-whitespace peek get)
+			  (read-json-scalar-or-enter-non-scalar))
+		   (json-error "Unmatched object key, expected ':'")))
+	      (else
+	       (let ((x (if require-comma?
+			    (if (eq? x #\,)
+				(begin (get)
+				       (skip-json-whitespace peek get)
+				       (peek))
+				(json-error "Missing ',' between object members"))
+			    (begin (set! require-comma? #t)
+				   x))))
+		 (cond ((eq? x #\")
+			(begin (set! require-colon? #t)
+			       (read-json-string peek get)))
+		       ((eof-object? x)
+			(json-error "Unexpected 'eof'"))
+		       (else
+			(json-error "Invalid object member name, expected string")))))))))))
 
 (define (json-generator #!optional (port-or-generator (current-input-port)))
   (receive (peek get) (wrap-port-or-generator port-or-generator)
-    (make-json-generator
-     (make-json-token-generator peek get))))
+    (make-json-generator peek get)))
 
 (define (json-fold proc
 		   array-start
