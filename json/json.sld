@@ -7,6 +7,7 @@
 	  json-generator
 	  json-fold
 	  json-read
-	  )
+	  json-accumulator
+	  json-write)
   (import (gambit))
   (include "json.scm"))
