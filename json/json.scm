@@ -33,7 +33,9 @@
 
 (define (json-string-char-must-be-escaped? ch)
   (let ((n (char->integer ch)))
-    (>= #x001F n #x000)))
+    (or (= n #x005c)            ; \
+	(= n #x0022)            ; "
+	(>= #x001F n #x000))))  ; control characters
 
 (define (digit0-9? ch)
   (<= 48 (char->integer ch) 57))
