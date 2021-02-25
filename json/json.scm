@@ -507,6 +507,29 @@
   (or (exact-integer? num)
       (and (inexact? num) (rational? num))))
 
+(define (scheme-alist-is-valid-json? alist)
+  ;; must check both null? and pair? in case of improper list
+  (or (null? alist)
+      (and (pair? alist)
+	   (pair? (car alist))
+	   (symbol? (caar alist))
+	   (scheme-is-valid-json? (cdar alist))
+	   (scheme-alist-is-valid-json? (cdr alist)))))
+
+(define (scheme-vector-is-valid-json? vec)
+  (let ((len (vector-length vec)))
+    (let loop ((i 0))
+      (or (= i len)
+	  (and (scheme-is-valid-json? (vector-ref vec i))
+	       (loop (+ i 1)))))))
+
+(define (scheme-is-valid-json? x)
+  (or (string? x)
+      (and (number? x) (scheme-number-is-valid-json? x))
+      (and (vector? x) (scheme-vector-is-valid-json? x))
+      (memq x '(#t #f null))
+      (scheme-alist-is-valid-json? x)))
+
 ;;; ======================================================================
 ;;; writing
 
@@ -549,6 +572,43 @@
 	(else
 	 (json-error (string-append "Scheme number is not valid json: " (number->string num))))))
 
+;; alist is assumed to be valid json
+(define (unsafe-write-json-object alist acc)
+  (if (null? alist)
+      (begin (acc #\{) (acc #\}))
+      (begin (acc #\{)
+	     (let loop ((alist alist))
+	       (write-json-string (symbol->string (caar alist)) acc)
+	       (acc #\:)
+	       (unsafe-write-json-scheme (cdar alist) acc)
+	       (if (pair? (cdr alist))
+		   (begin (acc #\,)
+			  (loop (cdr alist)))
+		   (acc #\}))))))
+
+;; vec is assumed to be valid json
+(define (unsafe-write-json-vector vec acc)
+  (let ((len (vector-length vec)))
+    (if (zero? len)
+	(begin (acc #\[) (acc #\]))
+	(begin (acc #\[)
+	       (let loop ((i 0))
+		 (unsafe-write-json-scheme (vector-ref vec i) acc)
+		 (if (= i (- len 1))
+		     (acc #\])
+		     (begin (acc #\,)
+			    (loop (+ i 1)))))))))
+
+;; x is assumed to be valid json
+(define (unsafe-write-json-scheme x acc)
+  (cond ((number? x)   (write-json-number x acc))
+	((string? x)   (write-json-string x acc))
+	((vector? x)   (unsafe-write-json-vector x acc))
+	((eq? x #t)    (acc #\t) (acc #\r) (acc #\u) (acc #\e))
+	((eq? x #f)    (acc #\f) (acc #\a) (acc #\l) (acc #\s) (acc #\e))
+	((eq? x 'null) (acc #\n) (acc #\u) (acc #\l) (acc #\l))
+	(else          (unsafe-write-json-object x acc))))
+
 (define (make-json-accumulator acc)
 
   (define stack '())
@@ -578,7 +638,7 @@
 
   ;; Write a scheme object x into the accumulator. Does not handle writing
   ;; preceding comma or colon, does not handle array-end or object-end
-  (define (write-json-scheme x)
+  (define (write-json-scheme x acc)
     (cond ((number? x) (write-json-number x acc))
 	  ((string? x) (write-json-string x acc))
 	  ((eq? x #t) (acc #\t) (acc #\r) (acc #\u) (acc #\e))
@@ -608,14 +668,16 @@
 	   (case structure-state
 	     ((head body)
 	      (cond ((string? x)
-		     (when (eq? structure-state body) (acc #\,))
+		     (when (eq? structure-state 'body) (acc #\,))
 		     (set! structure-state 'object-member-value)
 		     (write-json-string x acc))
 		    ((eq? x 'object-end)
 		     (stack-pop!)
 		     (acc #\}))
 		    (else
-		     (json-error "TODO 111"))))
+		     (json-error "Write error, accumulator expected either a \
+                                  string beginning a new key/value pair or object-end"
+				 x))))
 	     (else ;object-member-value
 	      (acc #\:)
 	      (set! structure-state 'body)
@@ -634,6 +696,13 @@
 
 (define (json-accumulator #!optional (port-or-accumulator (current-output-port)))
   (make-json-accumulator (if (port? port-or-accumulator)
-			     (port->accumulator port-or-accumulator)
+			     (output-port->accumulator port-or-accumulator)
 			     port-or-accumulator)))
+
+(define (json-write obj #!optional (port-or-accumulator (current-output-port)))
+  (if (scheme-is-valid-json? obj)
+      (unsafe-write-json-scheme obj (if (port? port-or-accumulator)
+					(output-port->accumulator port-or-accumulator)
+					port-or-accumulator) )
+      (json-error "json-write: scheme object is not valid json" obj)))
 
