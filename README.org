@@ -1,12 +1,16 @@
 An implementation of [[https://srfi.schemers.org/srfi-180/][SRFI 180]]: JSON for [[http://www.gambitscheme.org/][gambit]].
 
-* TODO
+* Work In Progess
+
+Implemented: json-generator, json-fold, and json-read
+
+** TODO
 
 - json-lines-read and json-sequence-read not yet implemented
 - Writing json is not yet implemented
 - json-nesting-depth-limit and json-number-of-character-limit are not being
   checked (should be trivial to add)
-- Use gambit specific unsafe primitives where ever possible
+- Use gambit specific unsafe primitives where possible
 
 * Tests
 
@@ -42,10 +46,3 @@ possibly using all available memory. The test data includes one such file:
 "i_number_huge_exp.json" (the test case is commented out).
 
 Should there be a way to mitigate this risk?
-
-* Some tests cases can crash my emacs
-
-Opening the file "y_string_unicode_2.json" causes my emacs (only in graphical
-mode not terminal) to segfault. :(
-
-Also the unescaped unicode sequence in "y_string_unicode_U+FDD0_nonchar.json"
