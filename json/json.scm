@@ -18,6 +18,9 @@
 (define json-number-of-character-limit
   (make-parameter +inf.0))
 
+;;; ======================================================================
+;;; Reading related utilities
+
 (define (char-hexdigit? ch)
   (let ((n (char->integer ch)))
     (or (and (>= n 48) (<= n 57))
@@ -66,7 +69,6 @@
    ;; low
    (+ #xdc00 (modulo (- n #x10000) #x400))))
 
-
 ;; Given a textual input port or a character generator return 2 thunks peek and
 ;; get which are analogous to peek-char and read-char
 (define (wrap-port-or-generator port-or-generator)
@@ -105,7 +107,10 @@
 				 x)
 			       (port-or-generator)))))))
 
-  ;; Input is position on first non-whitespace character or eof
+;;; ======================================================================
+;;; Reading
+
+  ;; Input is positioned on first non-whitespace character or eof
 (define (skip-json-whitespace peek get)
   (let loop ((x (peek)))
     (when (and (char? x) (json-char-whitespace? x))
@@ -362,13 +367,6 @@
       (let ((x (peek)))
 	(cond ((eof-object? x)
 	       (json-error "Unexpected 'eof'"))
-	      ((eq? x #\})
-	       (if require-colon?
-		   (json-error "Unmatched object key, expected ':'")
-		   (begin (get)
-			  (stack-pop!)
-			  (set! require-comma? #t)
-			  'object-end)))
 	      (require-colon?
 	       (if (eq? x #\:)
 		   (begin (get)
@@ -376,6 +374,11 @@
 			  (skip-json-whitespace peek get)
 			  (read-json-scalar-or-enter-non-scalar))
 		   (json-error "Unmatched object key, expected ':'")))
+	      ((eq? x #\})
+	       (get)
+	       (stack-pop!)
+	       (set! require-comma? #t)
+	       'object-end)
 	      (else
 	       (let ((x (if require-comma?
 			    (if (eq? x #\,)
@@ -484,4 +487,158 @@
     (if (eq? out %root)
         (eof-object)
         out)))
+
+;;; ======================================================================
+;;; Writing related utilities
+
+(define (output-port->accumulator port)
+  (lambda (ch) (write-char ch port)))
+
+(define (accumulate-substring str acc start end)
+  (let loop ((i start))
+    (unless (>= i end)
+      (acc (string-ref str i))
+      (loop (+ i 1)))))
+
+(define-syntax dotimes
+  (syntax-rules ()
+    ((_ n expr)
+     (let loop ((count n))
+       (when (> count 0)
+	 expr
+	 (loop (- count 1)))))))
+
+(define (scheme-number-is-valid-json? num)
+  (or (exact-integer? num)
+      (and (inexact? num) (rational? num))))
+
+;;; ======================================================================
+;;; writing
+
+(define (write-json-string str acc)
+  (acc #\")
+  (string-for-each (lambda (ch)
+		     (case ch
+		       ((#\" #\\)     (acc #\\) (acc ch))
+		       ((#\backspace) (acc #\\) (acc #\b))
+		       ((#\x000c)     (acc #\\) (acc #\f))  ; form feed
+		       ((#\newline)   (acc #\\) (acc #\n))
+		       ((#\return)    (acc #\\) (acc #\r))
+		       ((#\tab)       (acc #\\) (acc #\t))
+		       (else
+			(if (<= (char->integer ch) #x001F)
+			    (let ((hexstring (number->string (char->integer ch) 16)))
+			      (acc #\\)
+			      (acc #\u)
+			      (dotimes (- 4 (string-length hexstring))
+				(acc #\0))
+			      (string-for-each acc hexstring))
+			    (acc ch)))))
+		   str)
+  (acc #\"))
+
+(define (write-json-number num acc)
+  (cond ((exact-integer? num)
+	 (string-for-each acc (number->string num)))
+	((and (inexact? num) (rational? num))
+	 (let* ((str (number->string num))
+		(len (string-length str))
+		(i (if (eq? #\- (string-ref str 0))
+		       (begin (acc #\-) 1)
+		       0)))
+	   ;; if number starts with '.' add leading 0
+	   (when (char=? #\. (string-ref str i)) (acc #\0))
+	   (accumulate-substring str acc i len)
+	   ;; if number ends with  '.' add trailing 0
+	   (when (char=? #\. (string-ref str (- len 1))) (acc #\0))))
+	(else
+	 (json-error (string-append "Scheme number is not valid json: " (number->string num))))))
+
+(define (make-json-accumulator acc)
+
+  (define stack '())
+
+  ;; structure-state is #f or one of the symbols head | body | object-member-value
+
+  ;; head means we have just begun an object or array (do NOT emit a comma)
+
+  ;; body means we have emitted at least one element of an array or key/value
+  ;; pair of an object (do emit comma)
+
+  ;; object-member-value means we are expecting the value portion of an object
+  ;; key/value pair (emit colon, do NOT emit comma)
+  
+  (define structure-state #f)
+  
+  (define (stack-pop!)
+    (let ((head (car stack))
+	  (tail (cdr stack)))
+      (set! structure-state (if (pair? tail) 'body #f))
+      (set! stack tail)
+      head))
+
+  (define (stack-push! x)
+    (set! structure-state 'head)
+    (set! stack (cons x stack)))
+
+  ;; Write a scheme object x into the accumulator. Does not handle writing
+  ;; preceding comma or colon, does not handle array-end or object-end
+  (define (write-json-scheme x)
+    (cond ((number? x) (write-json-number x acc))
+	  ((string? x) (write-json-string x acc))
+	  ((eq? x #t) (acc #\t) (acc #\r) (acc #\u) (acc #\e))
+	  ((eq? x #f) (acc #\f) (acc #\a) (acc #\l) (acc #\s) (acc #\e))
+	  (else
+	   (case x
+	     ((null) (acc #\n) (acc #\u) (acc #\l) (acc #\l))
+	     ((array-start)
+	      (stack-push! 'array)
+	      (acc #\[))
+	     ((object-start)
+	      (stack-push! 'object)
+	      (acc #\{))
+	     ((array-end)
+	      (json-error "Write error, unexpected array-end"))
+	     ((object-end)
+	      (json-error "Write error, unexpected object-end"))
+	     (else
+	      (json-error "Write error, unexpected value passed to accumulator" x))))))
+
+  (lambda (x)
+    (if (null? stack)
+	(write-json-scheme x acc)
+	(case (car stack)
+	  
+	  ((object)
+	   (case structure-state
+	     ((head body)
+	      (cond ((string? x)
+		     (when (eq? structure-state body) (acc #\,))
+		     (set! structure-state 'object-member-value)
+		     (write-json-string x acc))
+		    ((eq? x 'object-end)
+		     (stack-pop!)
+		     (acc #\}))
+		    (else
+		     (json-error "TODO 111"))))
+	     (else ;object-member-value
+	      (acc #\:)
+	      (set! structure-state 'body)
+	      (write-json-scheme x acc))))
+
+	  (else ;array
+	   (cond ((eq? x 'array-end)
+		  (stack-pop!)
+		  (acc #\]))
+		 ((eq? structure-state 'head)
+		  (set! structure-state 'body)
+		  (write-json-scheme x acc))
+		 (else
+		  (acc #\,)
+		  (write-json-scheme x acc))))))))
+
+(define (json-accumulator #!optional (port-or-accumulator (current-output-port)))
+  (make-json-accumulator (if (port? port-or-accumulator)
+			     (port->accumulator port-or-accumulator)
+			     port-or-accumulator)))
 
