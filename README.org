@@ -2,15 +2,24 @@ An implementation of [[https://srfi.schemers.org/srfi-180/][SRFI 180]]: JSON for
 
 * Work In Progess
 
-Implemented: json-generator, json-fold, and json-read
+** Implemented
 
-** TODO
+- json-generator
+- json-fold
+- json-read
+- json-accumulator
+- json-write
+
+** todo
 
 - json-lines-read and json-sequence-read not yet implemented
-- Writing json is not yet implemented
 - json-nesting-depth-limit and json-number-of-character-limit are not being
   checked (should be trivial to add)
+- Stricter type checking on exported procedures
 - Use gambit specific unsafe primitives where possible
+- Maybe add options to insert a replacement character when an escaped unpaired
+  surrogate is read and for handling byte order mark
+- Maybe a pretty-print procedure
 
 * Tests
 
@@ -20,7 +29,7 @@ The json files used for testing are from [[https://github.com/nst/JSONTestSuite/
 
 ** Encoding
 
-If the contents of the supplied input port cannot be decoded, in the specified
+If the contents of the supplied input port cannot be decoded, using that port's
 encoding, a json-error is raised.
 
 The test suite is run using UTF-8 encoding for every test file.
@@ -37,12 +46,10 @@ accordingly) without emitting the BOM.
 Gambit strings cannot contain unpaired surrogates so we raise a json-error when
 encountered.
 
-Maybe there is a way ?
-
 ** Very large numbers
 
-Some valid inputs may cause gambit to attempt to produce a very large bignum
-possibly using all available memory. The test data includes one such file:
-"i_number_huge_exp.json" (the test case is commented out).
+Some grammatically valid inputs may cause gambit to perform expensive bignum
+operations possibly using all available memory. The test data includes one such
+file: "i_number_huge_exp.json" (the test case is commented out).
 
 Should there be a way to mitigate this risk?
