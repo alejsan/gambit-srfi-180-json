@@ -8,22 +8,72 @@
 (define test-data-dir
   (string-append (path-directory (current-filename)) "/test_data/test_parsing"))
 
-(define (parse-file f)
-  (with-input-from-file (list path: f char-encoding: 'UTF-8)
-    (lambda () (json-read))))
+(define (string->json-generator str)
+  (json-generator (open-input-string str)))
+
+(define (file->json-generator f)
+  (json-generator (open-input-file (list path: f char-encoding: 'UTF-8))))
+
+(define (json-read-file f)
+  (with-input-from-file (list path: f char-encoding: 'UTF-8) json-read))
+
+(define (json-read-string str)
+  (with-input-from-string str json-read))
+
+(define (json-write-into-string x)
+  (with-output-to-string (lambda () (json-write x))))
+
+(define (generator-for-each proc gen)
+  (let loop ((x (gen)))
+    (unless (eof-object? x)
+      (proc x)
+      (loop (gen)))))
+
+(define (list->generator lis)
+  (lambda ()
+    (if (null? lis)
+	(eof-object)
+	(let ((x (car lis)))
+	  (set! lis (cdr lis))
+	  x))))
+
+;; The current implementation of json-write does not use json-accumulator so
+;; they must be tested seperately
+
+(define (json-accumulate-into-string json-gen)
+  (call-with-output-string
+   (lambda (output-string)
+     (generator-for-each (json-accumulator output-string) json-gen))))
+
+(define (json-accumulate-file-into-string file)
+  (json-accumulate-into-string (file->json-generator file)))
+
+(define (json-accumulate-string-into-string string)
+  (json-accumulate-into-string (string->json-generator string)))
 
 (define-syntax test-json
   (syntax-rules ()
     ((_ expected file)
-     (test-equal expected (parse-file (string-append test-data-dir "/" file))))))
+     (test-assert
+      (let* ((test-file (string-append test-data-dir "/" file))
+	     (x (json-read-file test-file))
+	     (expected* expected))
+	(and (equal? x expected*)
+	     (equal? expected* (json-read-string (json-write-into-string x)))
+	     (equal? expected* (json-read-string (json-accumulate-file-into-string test-file)))))))))
 
 (define-syntax test-json-error
   (syntax-rules ()
     ((_ file)
-     (test-error json-error? (parse-file (string-append test-data-dir "/" file))))))
+     (test-error json-error? (json-read-file (string-append test-data-dir "/" file))))))
 
-;; ======================================================================
-;; implementation dependant tests
+(define-syntax test-json-accumulator-error
+  (syntax-rules ()
+    ((_ tokens)
+     (test-error json-error? (json-accumulate-into-string (list->generator tokens))))))
+
+;;; ======================================================================
+;;; implementation dependant tests
 
 ;; note that several of these tests deal with very large or small numbers so the
 ;; exact behavior may depend on how your gambit was compiled (bignum support?)
@@ -84,9 +134,8 @@
   "i_structure_500_nested_arrays.json")
 (test-json-error "i_structure_UTF-8_BOM_empty_object.json")
 
-;; ======================================================================
-;;
-;; tests with invalid json, a strictly conformant parser should reject these
+;;; ======================================================================
+;;; tests with invalid json, a strictly conformant parser should reject these
 
 (test-json-error "n_array_1_true_without_comma.json")
 (test-json-error "n_array_a_invalid_utf8.json")
@@ -261,8 +310,9 @@
 (test-json-error "n_structure_whitespace_formfeed.json")
 
 
-
-(test-json (eof-object) "n_structure_no_data.json")
+;; read eof from empty file 
+(test-equal (eof-object)
+	    (json-read-file (string-append test-data-dir "/" "n_structure_no_data.json")))
 
 ;; won't fix
 ;; (test-json-error "n_array_comma_after_close.json")
@@ -384,3 +434,54 @@
 (test-json #("a") "y_structure_trailing_newline.json")
 (test-json #(#t) "y_structure_true_in_array.json")
 (test-json #() "y_structure_whitespace_array.json")
+
+;;; ======================================================================
+;;; Additional tests for json-write and json-accumulator on bad input
+
+;; unmatched object-end
+(test-json-accumulator-error '(object-end))
+
+;; unmatched array-end
+(test-json-accumulator-error '(array-end))
+(test-json-accumulator-error '(object-start array-end))
+
+;; numbers must be exact-integers or inexact rationals
+(test-json-accumulator-error '(+inf.0))
+(test-json-accumulator-error '(+nan.0))
+(test-json-accumulator-error '(3/5))
+(test-json-accumulator-error '(0+1i))
+
+(test-error json-error? (json-write-into-string +inf.0))
+(test-error json-error? (json-write-into-string +nan.0))
+(test-error json-error? (json-write-into-string 3/5))
+(test-error json-error? (json-write-into-string 0+1i))
+
+;; symbols other than null
+(test-json-accumulator-error '(foo))
+(test-json-accumulator-error '(nul))
+
+(test-error json-error? (json-write-into-string 'foo))
+(test-error json-error? (json-write-into-string 'nul))
+
+;; some objects that are not valid json
+(test-json-accumulator-error '(array-start #u8(12 32 12) array-end))
+(test-json-accumulator-error (list 'array-start (lambda () 1) 'array-end))
+
+(test-error json-error? (json-write-into-string (vector #u8(12 32 12))))
+(test-error json-error? (json-write-into-string (vector (lambda () 1))))
+
+;; json-accumulator requires keys be strings for consistency with json-generator
+(test-json-accumulator-error '(object-start foo 12 object-end))
+(test-json-accumulator-error '(object-start #t 12 object-end))
+
+;; json-write requires keys are symbols
+(test-error json-error? (json-write-into-string '(("invalid" . 12) (valid . 2))))
+(test-error json-error? (json-write-into-string '((#t . 42))))
+
+;; not an alist
+(test-error json-error? (json-write-into-string '(this is not valid)))
+
+;; improper lists
+(test-error json-error? (json-write-into-string '(#t . #f)))
+(test-error json-error? (json-write-into-string #(((foo . 2) (bar . "bar") . #f))))
+
