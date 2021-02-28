@@ -2,13 +2,14 @@
 ;; https://srfi.schemers.org/srfi-180/
 
 (define-record-type <json-error>
-  (make-json-error reason irritants port-or-generator)
+  (make-json-error reason irritants source-or-sink)
   json-error?
   (reason json-error-reason)
   (irritants json-error-irritants)
-  (port-or-generator json-error-port-or-generator))
+  (source-or-sink json-error-source-or-sink))
 
-(define (json-error reason . irritants) (raise (make-json-error reason irritants #f)))
+(define (json-error reason . irritants)
+  (raise (make-json-error reason irritants (json-current-source-or-sink))))
 
 (define (json-null? obj) (eq? obj 'null))
 
@@ -17,6 +18,12 @@
 
 (define json-number-of-character-limit
   (make-parameter +inf.0))
+
+;; Unexported parameter used when raising a json-error. Should be parameterized
+;; to the supplied port-or-generator when reading OR the port-or-accumulator
+;; when writing
+(define json-current-source-or-sink
+  (make-parameter #f))
 
 ;;; ======================================================================
 ;;; Reading related utilities
@@ -72,40 +79,26 @@
 ;; Given a textual input port or a character generator return 2 thunks peek and
 ;; get which are analogous to peek-char and read-char
 (define (wrap-port-or-generator port-or-generator)
-  (if (port? port-or-generator)
-      
-      (values (lambda ()
-		(with-exception-catcher
-		    (lambda (e)
-		      (cond ((and (os-exception? e)
-				  ;; TODO the exact code may be OS dependant!
-				  (= -507496832 (os-exception-code e)))
-			     (json-error "Invalid UTF-8 encoding" e))
-			    (else (raise e))))
-		  (lambda () (peek-char port-or-generator))))
-	      (lambda ()
-		(with-exception-catcher
-		    (lambda (e)
-		      (cond ((and (os-exception? e)
-				  ;; TODO the exact code may be OS dependant!
-				  (= -507496832 (os-exception-code e)))
-			     (json-error "Invalid UTF-8 encoding" e))
-			    (else (raise e))))
-		  (lambda () (read-char port-or-generator)))))
-
-      ;; TODO if i'm going to use unsafe ## procedures then I need to add checks
-      ;; that user provided generator always produces either a character or eof
-      
-      (let ((peeked #f))
-	(values (lambda () (or peeked
-			       (let ((x (port-or-generator)))
-				 (set! peeked x)
-				 x)))
-		(lambda () (if peeked
-			       (let ((x peeked))
-				 (set! peeked #f)
-				 x)
-			       (port-or-generator)))))))
+  (cond ((and (textual-port? port-or-generator)
+	      (input-port? port-or-generator))
+	 (values (lambda () (peek-char port-or-generator))
+		 (lambda () (read-char port-or-generator))))
+	
+	;; TODO if i'm going to use unsafe ## procedures then I need to add checks
+	;; that user provided generator always produces either a character or eof
+	((procedure? port-or-generator)
+	 (let ((peeked #f))
+	   (values (lambda () (or peeked
+				  (let ((x (port-or-generator)))
+				    (set! peeked x)
+				    x)))
+		   (lambda () (if peeked
+				  (let ((x peeked))
+				    (set! peeked #f)
+				    x)
+				  (port-or-generator))))))
+	(else
+	 (error "Expected textual input-port or generator" port-or-generator))))
 
 ;;; ======================================================================
 ;;; Reading
@@ -133,14 +126,14 @@
     ((false) #f)
     ((true) #t)
     ((null) 'null)
-    (else (json-error "invalid json syntax, unrecognized literal"))))
+    (else (json-error "Read error, unrecognized literal"))))
 
 (define (read-json-number peek get)
 
   (define (write-ascii-digit ch)
     (if (digit0-9? ch)
 	(write-char ch)
-	(json-error "Invalid number")))
+	(json-error "Read error, invalid number")))
 
   (define (read-int in)
     (cond ((eof-object? in) #t)
@@ -152,7 +145,7 @@
 	  ((memq in '(#\e #\E))
 	   (read-exp-start))
 	  ((json-char-delimiter? in) #t)
-	  (else (json-error "Invalid number"))))
+	  (else (json-error "Read error, invalid number"))))
 
   (define (read-frac-start)
     ;; write the '.'
@@ -169,7 +162,7 @@
 	  ((memq in '(#\e #\E))
 	   (read-exp-start))
 	  ((json-char-delimiter? in) #t)
-	  (else (json-error "Invalid number"))))
+	  (else (json-error "Read error, invalid number"))))
 
   (define (read-exp-start)
     ;; write the 'e' or 'E'
@@ -186,7 +179,7 @@
 	   (write-char (get))
 	   (read-exp (peek)))
 	  ((json-char-delimiter? in) #t)
-	  (else (json-error "Invalid number"))))
+	  (else (json-error "Read error, invalid number"))))
   
   (string->number
    (with-output-to-string
@@ -202,11 +195,11 @@
 			((memq next '(#\e #\E))
 			 (read-exp-start))
 			((json-char-delimiter? next) #t)
-			(else (json-error "Invalid number")))))
+			(else (json-error "Read error, invalid number")))))
 	       ((digit1-9? in)
 		(write-char (get))
 		(read-int (peek)))
-	       (else (json-error "Invalid number"))))))))
+	       (else (json-error "Read error, invalid number"))))))))
 
 ;; this should be called immediately after the '\u' escape in a json
 ;; string. Read 4 hex digits and return their numeric value
@@ -221,7 +214,7 @@
 	    ((<= 97 n 102) ; a-f
 	     (- n 87))
 	    (else
-	     (json-error "Invalid unicode escape")))))
+	     (json-error "Read error, invalid unicode escape in string")))))
   
   (let loop ((in (peek))
 	     (acc 0)
@@ -229,7 +222,7 @@
     (if (= count 4)
 	acc
 	(if (eof-object? in)
-	    (json-error "Unexpected 'eof'")
+	    (json-error "Read error, unexpected eof")
 	    (let ((n (hexdigit-value (get))))
 	      (loop (peek)
 		    (bitwise-ior (arithmetic-shift acc 4) n)
@@ -241,11 +234,11 @@
     (lambda ()
       (let loop ((in (get)))
 	(cond ((eof-object? in)
-	       (json-error "invalid json syntax, missing terminating \""))
+	       (json-error "Read error, string missing terminating \""))
 	      ((eq? in #\\)
 	       (let ((x (get)))
 		 (if (eof-object? x)
-		     (json-error "invalid json syntax, missing terminating \"")
+		     (json-error "Read error, string missing terminating \"")
 		     (case x
 		       ((#\" #\\ #\/) (write-char x))
 		       ((#\b) (write-char #\backspace))
@@ -256,22 +249,24 @@
 		       ((#\u)
 			(let ((n (read-unicode-escape peek get)))
 			  (cond ((high-surrogate? n)
-				 (unless (eq? (get) #\\) (json-error "unmatched high surrogate"))
-				 (unless (eq? (get) #\u) (json-error "unmatched high surrogate"))
+				 (unless (eq? (get) #\\)
+				   (json-error "Read error, unmatched high surrogate in string"))
+				 (unless (eq? (get) #\u)
+				   (json-error "Read error, unmatched high surrogate in string"))
 				 (let ((maybe-low (read-unicode-escape peek get)))
 				   (if (low-surrogate? maybe-low)
 				       (write-char (integer->char (surrogate-pair->code-point n maybe-low)))
-				       (json-error "unmatched high surrogate"))))
+				       (json-error "Read error, unmatched high surrogate in string"))))
 				((low-surrogate? n)
-				 (json-error "unmatched low surrogate"))
+				 (json-error "Read error, unmatched low surrogate in string"))
 				(else
 				 (write-char (integer->char n))))))
 		       (else
-			(json-error "Invalid escape sequence" x))))
+			(json-error "Read error, invalid escape sequence in string" (string #\\ x)))))
 		 (loop (get))))
 	      ((eq? in #\") #t)
 	      ((json-string-char-must-be-escaped? in)
-	       (json-error "Unescaped control character"))
+	       (json-error "Read error, unescaped control character in string" in))
 	      (else
 	       (write-char in)
 	       (loop (get))))))))
@@ -284,11 +279,11 @@
       ((#\-) (read-json-number peek get))
       (else
        (cond ((eof-object? x)
-	      (json-error "Unexpected 'eof'"))
+	      (json-error "Read error, unexpected eof"))
 	     ((digit0-9? x)
 	      (read-json-number peek get))
 	     (else
-	      (json-error "Unexpected character" x)))))))
+	      (json-error "Read error, unexpected character" x)))))))
 
 (define (read-json-array peek get)
   (get) ; get initial '['
@@ -300,7 +295,7 @@
 	  (skip-json-whitespace peek get)
 	  (let ((x (peek)))
 	    (cond ((eof-object? x)
-		   (json-error "Unexpected 'eof'"))
+		   (json-error "Read error, unexpected eof"))
 		  ((eq? x #\,)
 		   (get)
 		   (skip-json-whitespace peek get)
@@ -309,15 +304,15 @@
 		   (get)
 		   (list->vector (reverse (cons value acc))))
 		  (else
-		   (json-error "Missing ',' between array elements"))))))))
+		   (json-error "Read error, missing ',' between array elements"))))))))
 
 (define (read-json-object peek get)
 
   (define (read-key)
     (let ((x (peek)))
       (cond ((eq? x #\") (read-json-string peek get))
-	    ((eof-object? x) (json-error "Unexpected 'eof'"))
-	    (else (json-error "Object member key is not a string")))))
+	    ((eof-object? x) (json-error "Read error, unexpected eof"))
+	    (else (json-error "Read error, object member key is not a string")))))
   
   (define (read-colon-and-value key)
     (skip-json-whitespace peek get)
@@ -326,9 +321,9 @@
 	     (skip-json-whitespace peek get)
 	     (read-json-value peek get))
 	    ((eof-object? x)
-	     (json-error "Unexpected 'eof'"))
+	     (json-error "Read error, unexpected eof"))
 	    (else
-	     (json-error "Missing ':' after object key" key)))))
+	     (json-error "Read error, missing ':' after object key" key)))))
   
   (get) ; get initial '{'
   (skip-json-whitespace peek get)
@@ -340,7 +335,7 @@
 	  (skip-json-whitespace peek get)
 	  (let ((x (peek)))
 	    (cond ((eof-object? x)
-		   (json-error "Unexpected 'eof'"))
+		   (json-error "Read error, unexpected eof"))
 		  ((eq? x #\,)
 		   (get)
 		   (skip-json-whitespace peek get)
@@ -349,7 +344,7 @@
 		   (get)
 		   (reverse (cons (cons (string->symbol key) value) acc)))
 		  (else
-		   (json-error "Missing ',' between object members"))))))))
+		   (json-error "Read error, missing ',' between object members"))))))))
 
 (define (read-json-value peek get)
   (let ((x (peek)))
@@ -358,7 +353,7 @@
       ((#\{) (read-json-object peek get))
       (else  (read-json-scalar peek get)))))
 
-(define (make-json-generator peek get)
+(define (make-json-generator port-or-generator peek get)
 
   (define depth 0)
 
@@ -402,7 +397,7 @@
     (skip-json-whitespace peek get)
     (let ((x (peek)))
       (cond ((eof-object? x)
-	     (json-error "Unexpected 'eof'"))
+	     (json-error "Read error, unexpected eof"))
 	    ((eq? x #\])
 	     (get)
 	     (stack-pop!)
@@ -411,7 +406,7 @@
 	     (if require-comma?
 		 (if (eq? x #\,)
 		     (begin (get) (skip-json-whitespace peek get))
-		     (json-error "Missing ',' between array elements"))
+		     (json-error "Read error, missing ',' between array elements"))
 		 (set! require-comma? #t))
 	     (read-json-scalar-or-enter-non-scalar)))))
 
@@ -419,7 +414,7 @@
     (skip-json-whitespace peek get)
     (let ((x (peek)))
       (cond ((eof-object? x)
-	     (json-error "Unexpected 'eof'"))
+	     (json-error "Read error, unexpected eof"))
 	    ((eq? x #\})
 	     (get)
 	     (stack-pop!)
@@ -430,36 +425,48 @@
 			      (begin (get)
 				     (skip-json-whitespace peek get)
 				     (peek))
-			      (json-error "Missing ',' between object members"))
+			      (json-error "Read error, missing ',' between object members"))
 			  (begin (set! require-comma? #t)
 				 x))))
 	       (cond ((eq? x #\")
 		      (begin (set! stack (cons handle-object-value stack))
 			     (read-json-string peek get)))
 		     ((eof-object? x)
-		      (json-error "Unexpected 'eof'"))
+		      (json-error "Read error, unexpected eof"))
 		     (else
-		      (json-error "Object member key is not a string"))))))))
+		      (json-error "Read error, object member key is not a string"))))))))
 
   (define (handle-object-value)
     (skip-json-whitespace peek get)
     (let ((x (peek)))
       (cond ((eof-object? x)
-	     (json-error "Unexpected 'eof'"))
+	     (json-error "Read error, unexpected eof"))
 	    ((eq? x #\:)
 	     (get)
 	     (set! stack (cdr stack))
 	     (skip-json-whitespace peek get)
 	     (read-json-scalar-or-enter-non-scalar))
 	    (else
-	     (json-error "Missing ':' after object key")))))
+	     (json-error "Read error, missing ':' after object key")))))
 
   (set! stack (list start eof-object))
-  (lambda () ((car stack))))
+  
+  (lambda ()
+    (parameterize ((json-current-source-or-sink port-or-generator))
+      (with-exception-catcher
+	  (lambda (e)
+	    (cond ((and (os-exception? e)
+			(memq port-or-generator (os-exception-arguments e))
+			;; TODO the exact code may be OS dependant!
+			(= -507496832 (os-exception-code e)))
+		   (json-error "Read error, invalid UTF-8 encoding" e))
+		  (else (raise e))))
+	(lambda ()
+	  ((car stack)))))))
 
 (define (json-generator #!optional (port-or-generator (current-input-port)))
   (receive (peek get) (wrap-port-or-generator port-or-generator)
-    (make-json-generator peek get)))
+    (make-json-generator port-or-generator peek get)))
 
 (define (json-fold proc
 		   array-start
@@ -490,17 +497,33 @@
 
 (define (json-read #!optional (port-or-generator (current-input-port)))
   (receive (peek get) (wrap-port-or-generator port-or-generator)
-    (skip-json-whitespace peek get)
-    (if (eof-object? (peek))
-	(eof-object)
-	(read-json-value peek get))))
+    (parameterize ((json-current-source-or-sink port-or-generator))
+      (with-exception-catcher
+	  (lambda (e)
+	    (cond ((and (os-exception? e)
+			(memq port-or-generator (os-exception-arguments e))
+			;; TODO the exact code may be OS dependant!
+			(= -507496832 (os-exception-code e)))
+		   (json-error "Read error, invalid UTF-8 encoding" e))
+		  (else (raise e))))
+	(lambda ()
+	  (skip-json-whitespace peek get)
+	  (if (eof-object? (peek))
+	      (eof-object)
+	      (read-json-value peek get)))))))
 
 
 ;;; ======================================================================
 ;;; Writing related utilities
 
-(define (output-port->accumulator port)
-  (lambda (ch) (write-char ch port)))
+(define (wrap-port-or-accumulator port-or-accumulator)
+  (cond ((and (textual-port? port-or-accumulator)
+	      (output-port? port-or-accumulator))
+	 (lambda (ch) (write-char ch port-or-accumulator)))
+	((procedure? port-or-accumulator)
+	 port-or-accumulator)
+	(else
+	 (error "Expected textual output-port or accumulator" port-or-accumulator))))
 
 (define (accumulate-substring str acc start end)
   (let loop ((i start))
@@ -583,7 +606,7 @@
 	   ;; if number ends with  '.' add trailing 0
 	   (when (char=? #\. (string-ref str (- len 1))) (acc #\0))))
 	(else
-	 (json-error (string-append "Scheme number is not valid json: " (number->string num))))))
+	 (json-error "Write error, scheme number is not valid json" num))))
 
 ;; alist is assumed to be valid json
 (define (unsafe-write-json-object alist acc)
@@ -623,7 +646,7 @@
 	((eq? x 'null) (acc #\n) (acc #\u) (acc #\l) (acc #\l))
 	(else          (unsafe-write-json-object x acc))))
 
-(define (make-json-accumulator acc)
+(define (make-json-accumulator port-or-accumulator acc)
 
   (define stack '())
 
@@ -690,17 +713,17 @@
     (write-json-scheme x acc))
 
   (set! stack (list start))
-  (lambda (x) ((car stack) x)))
+  
+  (lambda (x)
+    (parameterize ((json-current-source-or-sink port-or-accumulator))
+      ((car stack) x))))
 
 (define (json-accumulator #!optional (port-or-accumulator (current-output-port)))
-  (make-json-accumulator (if (port? port-or-accumulator)
-			     (output-port->accumulator port-or-accumulator)
-			     port-or-accumulator)))
+  (make-json-accumulator port-or-accumulator (wrap-port-or-accumulator port-or-accumulator)))
 
 (define (json-write obj #!optional (port-or-accumulator (current-output-port)))
   (if (scheme-is-valid-json? obj)
-      (unsafe-write-json-scheme obj (if (port? port-or-accumulator)
-					(output-port->accumulator port-or-accumulator)
-					port-or-accumulator) )
-      (json-error "json-write: scheme object is not valid json" obj)))
+      (parameterize ((json-current-source-or-sink port-or-accumulator))
+	(unsafe-write-json-scheme obj (wrap-port-or-accumulator port-or-accumulator)))
+      (json-error "Write error, scheme object is not valid json" obj)))
 
