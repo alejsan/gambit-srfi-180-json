@@ -627,27 +627,15 @@
 
   (define stack '())
 
-  ;; structure-state is #f or one of the symbols head | body | object-member-value
-
-  ;; head means we have just begun an object or array (do NOT emit a comma)
-
-  ;; body means we have emitted at least one element of an array or key/value
-  ;; pair of an object (do emit comma)
-
-  ;; object-member-value means we are expecting the value portion of an object
-  ;; key/value pair (emit colon, do NOT emit comma)
-  
-  (define structure-state #f)
+  (define write-comma? #f)
   
   (define (stack-pop!)
-    (let ((head (car stack))
-	  (tail (cdr stack)))
-      (set! structure-state (if (pair? tail) 'body #f))
-      (set! stack tail)
-      head))
+    (let ((x (car stack)))
+      (set! stack (cdr stack))
+      x))
 
   (define (stack-push! x)
-    (set! structure-state 'head)
+    (set! write-comma? #f)
     (set! stack (cons x stack)))
 
   ;; Write a scheme object x into the accumulator. Does not handle writing
@@ -661,10 +649,10 @@
 	   (case x
 	     ((null) (acc #\n) (acc #\u) (acc #\l) (acc #\l))
 	     ((array-start)
-	      (stack-push! 'array)
+	      (stack-push! handle-array)
 	      (acc #\[))
 	     ((object-start)
-	      (stack-push! 'object)
+	      (stack-push! handle-object)
 	      (acc #\{))
 	     ((array-end)
 	      (json-error "Write error, unexpected array-end"))
@@ -673,40 +661,36 @@
 	     (else
 	      (json-error "Write error, unexpected value passed to accumulator" x))))))
 
-  (lambda (x)
-    (if (null? stack)
-	(write-json-scheme x acc)
-	(case (car stack)
-	  
-	  ((object)
-	   (case structure-state
-	     ((head body)
-	      (cond ((string? x)
-		     (when (eq? structure-state 'body) (acc #\,))
-		     (set! structure-state 'object-member-value)
-		     (write-json-string x acc))
-		    ((eq? x 'object-end)
-		     (stack-pop!)
-		     (acc #\}))
-		    (else
-		     (json-error "Write error, accumulator expected either a \
-                                  string beginning a new key/value pair or object-end"
-				 x))))
-	     (else ;object-member-value
-	      (acc #\:)
-	      (set! structure-state 'body)
-	      (write-json-scheme x acc))))
+  (define (start x)
+    (write-json-scheme x acc))
 
-	  (else ;array
-	   (cond ((eq? x 'array-end)
-		  (stack-pop!)
-		  (acc #\]))
-		 ((eq? structure-state 'head)
-		  (set! structure-state 'body)
-		  (write-json-scheme x acc))
-		 (else
-		  (acc #\,)
-		  (write-json-scheme x acc))))))))
+  (define (handle-array x)
+    (if (eq? x 'array-end)
+	(begin (stack-pop!)
+	       (acc #\]))
+	(begin (if write-comma? (acc #\,) (set! write-comma? #t))
+	       (write-json-scheme x acc))))
+
+  (define (handle-object x)
+    (cond ((string? x)
+	   (if write-comma? (acc #\,) (set! write-comma? #t))
+	   (set! stack (cons handle-object-value stack))
+	   (write-json-string x acc))
+	  ((eq? x 'object-end)
+	   (stack-pop!)
+	   (acc #\}))
+	  (else
+	   (json-error "Write error, accumulator expected either a \
+                        string beginning a new key/value pair or object-end"
+		       x))))
+
+  (define (handle-object-value x)
+    (stack-pop!)
+    (acc #\:)
+    (write-json-scheme x acc))
+
+  (set! stack (list start))
+  (lambda (x) ((car stack) x)))
 
 (define (json-accumulator #!optional (port-or-accumulator (current-output-port)))
   (make-json-accumulator (if (port? port-or-accumulator)
