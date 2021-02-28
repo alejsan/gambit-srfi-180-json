@@ -37,6 +37,16 @@
 	  (set! lis (cdr lis))
 	  x))))
 
+(define (generator->list gen)
+  (let loop ((x (gen))
+	     (acc '()))
+    (if (eof-object? x)
+	(reverse acc)
+	(loop (gen) (cons x acc)))))
+
+(define (json-tokenize-file f)
+  (generator->list (file->json-generator f)))
+
 ;; The current implementation of json-write does not use json-accumulator so
 ;; they must be tested seperately
 
@@ -55,17 +65,19 @@
   (syntax-rules ()
     ((_ expected file)
      (test-assert
-      (let* ((test-file (string-append test-data-dir "/" file))
-	     (x (json-read-file test-file))
-	     (expected* expected))
-	(and (equal? x expected*)
-	     (equal? expected* (json-read-string (json-write-into-string x)))
-	     (equal? expected* (json-read-string (json-accumulate-file-into-string test-file)))))))))
+	 (let* ((test-file (string-append test-data-dir "/" file))
+		(x (json-read-file test-file))
+		(expected* expected))
+	   (and (equal? x expected*)
+		(equal? expected* (json-read-string (json-write-into-string x)))
+		(equal? expected* (json-read-string (json-accumulate-file-into-string test-file)))))))))
 
 (define-syntax test-json-error
   (syntax-rules ()
     ((_ file)
-     (test-error json-error? (json-read-file (string-append test-data-dir "/" file))))))
+     (begin
+       (test-error json-error? (json-read-file (string-append test-data-dir "/" file)))
+       (test-error json-error? (json-tokenize-file (string-append test-data-dir "/" file)))))))
 
 (define-syntax test-json-accumulator-error
   (syntax-rules ()
