@@ -1,6 +1,10 @@
 ; an implementation of srfi 180: json
 ;; https://srfi.schemers.org/srfi-180/
 
+(declare (standard-bindings)
+	 (block)
+	 (not safe))
+
 (define-record-type <json-error>
   (make-json-error reason irritants source-or-sink)
   json-error?
@@ -14,10 +18,14 @@
 (define (json-null? obj) (eq? obj 'null))
 
 (define json-nesting-depth-limit
-  (make-parameter +inf.0))
+  (make-parameter +inf.0
+		  (lambda (n)
+		    (if (number? n) n (error "json-nesting-depth-limit not a number" n)))))
 
 (define json-number-of-character-limit
-  (make-parameter +inf.0))
+  (make-parameter +inf.0
+		  (lambda (n)
+		    (if (number? n) n (error "json-number-of-character-limit not a number" n)))))
 
 ;; Unexported parameter used when raising a json-error. Should be parameterized
 ;; to the supplied port-or-generator when reading OR the port-or-accumulator
@@ -78,25 +86,35 @@
 
 ;; Given a textual input port or a character generator return 2 thunks peek and
 ;; get which are analogous to peek-char and read-char
-(define (wrap-port-or-generator port-or-generator)
+(define (wrap-port-or-generator port-or-generator character-limit)
+
+  (define count 0)
+
+  (define (count-inc!)
+    (when (= count character-limit)
+      (json-error "Read error, character limit reached"))
+    (set! count (+ count 1)))
+  
   (cond ((and (textual-port? port-or-generator)
 	      (input-port? port-or-generator))
 	 (values (lambda () (peek-char port-or-generator))
-		 (lambda () (read-char port-or-generator))))
+		 (lambda () (count-inc!) (read-char port-or-generator))))
 	
 	;; TODO if i'm going to use unsafe ## procedures then I need to add checks
 	;; that user provided generator always produces either a character or eof
 	((procedure? port-or-generator)
 	 (let ((peeked #f))
-	   (values (lambda () (or peeked
-				  (let ((x (port-or-generator)))
-				    (set! peeked x)
-				    x)))
-		   (lambda () (if peeked
-				  (let ((x peeked))
-				    (set! peeked #f)
-				    x)
-				  (port-or-generator))))))
+	   (values (lambda ()
+		     (or peeked
+			 (let ((x (begin (count-inc!) (port-or-generator))))
+			   (set! peeked x)
+			   x)))
+		   (lambda ()
+		     (if peeked
+			 (let ((x peeked))
+			   (set! peeked #f)
+			   x)
+			 (begin (count-inc!) (port-or-generator)))))))
 	(else
 	 (error "Expected textual input-port or generator" port-or-generator))))
 
@@ -285,13 +303,13 @@
 	     (else
 	      (json-error "Read error, unexpected character" x)))))))
 
-(define (read-json-array peek get)
+(define (read-json-array depth peek get)
   (get) ; get initial '['
   (skip-json-whitespace peek get)
   (if (eq? (peek) #\])
       (begin (get) #())
       (let loop ((acc '()))
-	(let ((value (read-json-value peek get)))
+	(let ((value (read-json-value depth peek get)))
 	  (skip-json-whitespace peek get)
 	  (let ((x (peek)))
 	    (cond ((eof-object? x)
@@ -306,7 +324,7 @@
 		  (else
 		   (json-error "Read error, missing ',' between array elements"))))))))
 
-(define (read-json-object peek get)
+(define (read-json-object depth peek get)
 
   (define (read-key)
     (let ((x (peek)))
@@ -319,7 +337,7 @@
     (let ((x (get)))
       (cond ((eq? x #\:)
 	     (skip-json-whitespace peek get)
-	     (read-json-value peek get))
+	     (read-json-value depth peek get))
 	    ((eof-object? x)
 	     (json-error "Read error, unexpected eof"))
 	    (else
@@ -346,14 +364,21 @@
 		  (else
 		   (json-error "Read error, missing ',' between object members"))))))))
 
-(define (read-json-value peek get)
+(define (read-json-value depth peek get)
   (let ((x (peek)))
     (case x
-      ((#\[) (read-json-array peek get))
-      ((#\{) (read-json-object peek get))
-      (else  (read-json-scalar peek get)))))
+      ((#\[)
+       (when (= (+ depth 1) (json-nesting-depth-limit))
+	 (json-error "Read error, nesting depth limit reached"))
+       (read-json-array (+ depth 1) peek get))
+      ((#\{)
+       (when (= (+ depth 1) (json-nesting-depth-limit))
+	 (json-error "Read error, nesting depth limit reached"))
+       (read-json-object (+ depth 1) peek get))
+      (else
+       (read-json-scalar peek get)))))
 
-(define (make-json-generator port-or-generator peek get)
+(define (make-json-generator peek get port-or-generator depth-limit)
 
   (define depth 0)
 
@@ -367,8 +392,9 @@
       x))
 
   (define (stack-push! x)
-    ;; TODO check depth limit
     (set! depth (+ depth 1))
+    (when (= depth depth-limit)
+      (json-error "Read error, nesting depth limit reached"))
     (set! stack (cons x stack))
     (set! require-comma? #f))
   
@@ -465,8 +491,8 @@
 	  ((car stack)))))))
 
 (define (json-generator #!optional (port-or-generator (current-input-port)))
-  (receive (peek get) (wrap-port-or-generator port-or-generator)
-    (make-json-generator port-or-generator peek get)))
+  (receive (peek get) (wrap-port-or-generator port-or-generator (json-number-of-character-limit))
+    (make-json-generator peek get port-or-generator (json-nesting-depth-limit))))
 
 (define (json-fold proc
 		   array-start
@@ -496,7 +522,7 @@
 	       (loop (proc x acc))))))))
 
 (define (json-read #!optional (port-or-generator (current-input-port)))
-  (receive (peek get) (wrap-port-or-generator port-or-generator)
+  (receive (peek get) (wrap-port-or-generator port-or-generator (json-number-of-character-limit))
     (parameterize ((json-current-source-or-sink port-or-generator))
       (with-exception-catcher
 	  (lambda (e)
@@ -510,7 +536,7 @@
 	  (skip-json-whitespace peek get)
 	  (if (eof-object? (peek))
 	      (eof-object)
-	      (read-json-value peek get)))))))
+	      (read-json-value 0 peek get)))))))
 
 
 ;;; ======================================================================

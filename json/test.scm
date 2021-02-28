@@ -47,6 +47,9 @@
 (define (json-tokenize-file f)
   (generator->list (file->json-generator f)))
 
+(define (json-tokenize-string str)
+  (generator->list (string->json-generator str)))
+
 ;; The current implementation of json-write does not use json-accumulator so
 ;; they must be tested seperately
 
@@ -448,7 +451,7 @@
 (test-json #() "y_structure_whitespace_array.json")
 
 ;;; ======================================================================
-;;; Additional tests for json-write and json-accumulator on bad input
+;;; Tests for json-write and json-accumulator on bad input
 
 ;; unmatched object-end
 (test-json-accumulator-error '(object-end))
@@ -496,4 +499,31 @@
 ;; improper lists
 (test-error json-error? (json-write-into-string '(#t . #f)))
 (test-error json-error? (json-write-into-string #(((foo . 2) (bar . "bar") . #f))))
+
+;;; ======================================================================
+;;; Test checking of nesting-depth-limit and character-limit
+
+(test-error json-error?
+	    (parameterize ((json-number-of-character-limit 1))
+	      (json-read-string "true")))
+
+(test-error json-error?
+	    (parameterize ((json-number-of-character-limit 1))
+	      (json-tokenize-string "true")))
+
+(test-equal #t
+	    (parameterize ((json-nesting-depth-limit 1))
+	      (json-read-string "true")))
+
+(test-equal '(#t)
+	    (parameterize ((json-nesting-depth-limit 1))
+	      (json-tokenize-string "true")))
+
+(test-error json-error?
+	    (parameterize ((json-nesting-depth-limit 1))
+	      (json-read-string "[true]")))
+
+(test-error json-error?
+	    (parameterize ((json-nesting-depth-limit 1))
+	      (json-tokenize-string "[true]")))
 
