@@ -288,7 +288,75 @@
 	     ((digit0-9? x)
 	      (read-json-number peek get))
 	     (else
-	      (json-error (string-append "Unexpected character '" (string x) "'"))))))))
+	      (json-error "Unexpected character" x)))))))
+
+(define (read-json-array peek get)
+  (get) ; get initial '['
+  (skip-json-whitespace peek get)
+  (if (eq? (peek) #\])
+      (begin (get) #())
+      (let loop ((acc '()))
+	(let ((value (read-json-value peek get)))
+	  (skip-json-whitespace peek get)
+	  (let ((x (peek)))
+	    (cond ((eof-object? x)
+		   (json-error "Unexpected 'eof'"))
+		  ((eq? x #\,)
+		   (get)
+		   (skip-json-whitespace peek get)
+		   (loop (cons value acc)))
+		  ((eq? x #\])
+		   (get)
+		   (list->vector (reverse (cons value acc))))
+		  (else
+		   (json-error "Missing ',' between array elements"))))))))
+
+(define (read-json-object peek get)
+
+  (define (read-key)
+    (let ((x (peek)))
+      (cond ((eq? x #\") (read-json-string peek get))
+	    ((eof-object? x) (json-error "Unexpected 'eof'"))
+	    (else (json-error "Object member key is not a string")))))
+  
+  (define (read-colon-and-value key)
+    (skip-json-whitespace peek get)
+    (let ((x (get)))
+      (cond ((eq? x #\:)
+	     (skip-json-whitespace peek get)
+	     (read-json-value peek get))
+	    ((eof-object? x)
+	     (json-error "Unexpected 'eof'"))
+	    (else
+	     (json-error "Missing ':' after object key" key)))))
+  
+  (get) ; get initial '{'
+  (skip-json-whitespace peek get)
+  (if (eq? (peek) #\})
+      (begin (get) '())
+      (let loop ((acc '()))
+	(let* ((key (read-key))
+	       (value (read-colon-and-value key)))
+	  (skip-json-whitespace peek get)
+	  (let ((x (peek)))
+	    (cond ((eof-object? x)
+		   (json-error "Unexpected 'eof'"))
+		  ((eq? x #\,)
+		   (get)
+		   (skip-json-whitespace peek get)
+		   (loop (cons (cons (string->symbol key) value) acc)))
+		  ((eq? x #\})
+		   (get)
+		   (reverse (cons (cons (string->symbol key) value) acc)))
+		  (else
+		   (json-error "Missing ',' between object members"))))))))
+
+(define (read-json-value peek get)
+  (let ((x (peek)))
+    (case x
+      ((#\[) (read-json-array peek get))
+      ((#\{) (read-json-object peek get))
+      (else  (read-json-scalar peek get)))))
 
 (define (make-json-generator peek get)
 
@@ -422,66 +490,13 @@
 	      (else
 	       (loop (proc x acc))))))))
 
-
-;; This definition of json-read is taken from the srfi document
-
 (define (json-read #!optional (port-or-generator (current-input-port)))
+  (receive (peek get) (wrap-port-or-generator port-or-generator)
+    (skip-json-whitespace peek get)
+    (if (eof-object? (peek))
+	(eof-object)
+	(read-json-value peek get))))
 
-  (define %root '(root))
-
-  (define (array-start seed)
-    ;; array will be read as a list, then converted into a vector in
-    ;; array-end.
-    '())
-
-  (define (array-end items)
-    (list->vector (reverse items)))
-
-  (define (object-start seed)
-    ;; object will be read as a property list, then converted into an
-    ;; alist in object-end.
-    '())
-
-  (define (plist->alist plist)
-    ;; PLIST is a list of an even number of items.  Otherwise,
-    ;; json-generator would have raised a json-error.
-    (let loop ((plist plist)
-               (out '()))
-      (if (null? plist)
-          out
-          (loop (cddr plist) (cons (cons (string->symbol (cadr plist)) (car plist)) out)))))
-
-  (define object-end plist->alist)
-
-  (define (proc obj seed)
-    ;; proc is called when a JSON value or structure was completely
-    ;; read.  The parse result is passed as OBJ.  In the case where
-    ;; what is parsed is a simple JSON value, OBJ is simply
-    ;; the token that is read.  It can be 'null, a number or a string.
-    ;; In the case where what is parsed is a JSON structure, OBJ is
-    ;; what is returned by OBJECT-END or ARRAY-END.
-    (if (eq? seed %root)
-        ;; This is toplevel.  A complete JSON value or structure was
-        ;; read, so return it.
-        obj
-        ;; This is not toplevel, hence json-fold is called recursively
-        ;; to parse an array or object.  Both ARRAY-START and
-        ;; OBJECT-START return an empty list as a seed to serve as an
-        ;; accumulator.  Both OBJECT-END and ARRAY-END expect a list
-        ;; as argument.
-        (cons obj seed)))
-
-  (let ((out (json-fold proc
-                        array-start
-                        array-end
-                        object-start
-                        object-end
-                        %root
-                        port-or-generator)))
-    ;; if out is the root object, then the port or generator is empty.
-    (if (eq? out %root)
-        (eof-object)
-        out)))
 
 ;;; ======================================================================
 ;;; Writing related utilities
@@ -592,12 +607,13 @@
     (if (zero? len)
 	(begin (acc #\[) (acc #\]))
 	(begin (acc #\[)
-	       (let loop ((i 0))
-		 (unsafe-write-json-scheme (vector-ref vec i) acc)
-		 (if (= i (- len 1))
-		     (acc #\])
-		     (begin (acc #\,)
-			    (loop (+ i 1)))))))))
+	       (unsafe-write-json-scheme (vector-ref vec 0) acc)
+	       (let loop ((i 1))
+		 (unless (= i len)
+		   (acc #\,)
+		   (unsafe-write-json-scheme (vector-ref vec i) acc)
+		   (loop (+ i 1))))
+	       (acc #\])))))
 
 ;; x is assumed to be valid json
 (define (unsafe-write-json-scheme x acc)
