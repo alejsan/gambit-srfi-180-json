@@ -13,9 +13,6 @@ An implementation of [[https://srfi.schemers.org/srfi-180/][SRFI 180]]: JSON for
 ** todo
 
 - json-lines-read and json-sequence-read not yet implemented
-- json-nesting-depth-limit and json-number-of-character-limit are not being
-  checked (should be trivial to add)
-- Stricter type checking on exported procedures
 - Use gambit specific unsafe primitives where possible
 - Maybe add options to insert a replacement character when an escaped unpaired
   surrogate is read and for handling byte order mark
@@ -24,6 +21,29 @@ An implementation of [[https://srfi.schemers.org/srfi-180/][SRFI 180]]: JSON for
 * Tests
 
 The json files used for testing are from [[https://github.com/nst/JSONTestSuite/][JSONTestSuite]].
+
+* Extensions to the SRFI
+
+** json-accumulator
+
+The port-or-accumulator argument to json-accumulator is optional and defaults to
+the value returned by current-output-port.
+
+** json-error objects have additional fields
+
+#+begin_src scheme
+(json-error-irritants obj)
+#+end_src
+
+Returns the (possibly empty) list of irritants associated with the json-error
+object.
+
+#+begin_src scheme
+(json-error-source-or-sink obj)
+#+end_src
+
+Returns the port, generator, or accumulator associated with the json-error
+object.
 
 * Implementation Notes
 
@@ -41,15 +61,15 @@ triggers an error. Unless the port's encoding is set to UTF-16 in which case
 gambit's read/peek-char interprets the byte order mark (and configures the port
 accordingly) without emitting the BOM.
 
-** Unpaired surrogates
+** Json strings containing escaped unpaired surrogates
 
-Gambit strings cannot contain unpaired surrogates so we raise a json-error when
+Gambit strings cannot contain unpaired surrogates so a json-error is raised when
 encountered.
 
 ** Very large numbers
 
 Some grammatically valid inputs may cause gambit to perform expensive bignum
 operations possibly using all available memory. The test data includes one such
-file: "i_number_huge_exp.json" (the test case is commented out).
+file "i_number_huge_exp.json" (the test case is commented out).
 
 Should there be a way to mitigate this risk?
