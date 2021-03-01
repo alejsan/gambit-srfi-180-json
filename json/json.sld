@@ -1,6 +1,8 @@
 (define-library (json)
   (export json-error?
 	  json-error-reason
+	  json-error-irritants
+	  json-error-source-or-sink
 	  json-null?
 	  json-nesting-depth-limit
 	  json-number-of-character-limit
