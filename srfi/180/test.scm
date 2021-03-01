@@ -1,6 +1,6 @@
 (import (gambit)
 	(_test)
-	(json))
+	(srfi 180))
 
 (define-syntax current-filename
   (lambda (src) (##source-path src)))

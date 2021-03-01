@@ -1,4 +1,4 @@
-(define-library (json)
+(define-library (srfi 180)
   (export json-error?
 	  json-error-reason
 	  json-error-irritants
@@ -12,4 +12,4 @@
 	  json-accumulator
 	  json-write)
   (import (gambit))
-  (include "json.scm"))
+  (include "180.scm"))
