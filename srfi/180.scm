@@ -643,10 +643,10 @@
 	       (write-json-string (symbol->string (caar alist)) acc)
 	       (acc #\:)
 	       (unsafe-write-json-scheme (cdar alist) acc)
-	       (if (pair? (cdr alist))
-		   (begin (acc #\,)
-			  (loop (cdr alist)))
-		   (acc #\}))))))
+	       (when (pair? (cdr alist))
+		 (acc #\,)
+		 (loop (cdr alist))))
+	     (acc #\}))))
 
 ;; vec is assumed to be valid json
 (define (unsafe-write-json-vector vec acc)
@@ -751,5 +751,70 @@
   (if (scheme-is-valid-json? obj)
       (parameterize ((json-current-source-or-sink port-or-accumulator))
 	(unsafe-write-json-scheme obj (wrap-port-or-accumulator port-or-accumulator)))
+      (json-error "Write error, scheme object is not valid json" obj)))
+
+(define (json-pretty-print obj
+			   #!optional
+			   (port-or-accumulator (current-output-port))
+			   (indent-string "  "))
+
+  (define acc (wrap-port-or-accumulator port-or-accumulator))
+
+  (define (indent)
+    (dotimes depth
+      (accumulate-substring indent-string acc 0 (string-length indent-string))))
+
+  (define depth 0)
+  (define previous #f)
+
+  (define (handle-string ch)
+    (if (and (eq? ch #\")
+	     (not (eq? previous #\\)))
+	(begin (set! previous #f)
+	       (set! k main))
+	(set! previous ch))
+    (acc ch))
+
+  (define (handle-structure-start ch)
+    (if (memq ch '(#\] #\}))
+	(begin (set! k main)
+	       (acc ch))
+	(begin (set! depth (+ depth 1))
+	       (acc #\newline)
+	       (indent)
+	       (set! k main)
+	       (main ch))))
+
+  (define (main ch)
+    (case ch
+      ((#\[ #\{)
+       (set! k handle-structure-start)
+       (acc ch))
+      ((#\] #\})
+       (set! depth (- depth 1))
+       (acc #\newline)
+       (indent)
+       (acc ch))
+      ((#\:)
+       (acc ch)
+       (acc #\space))
+      ((#\,)
+       (acc ch)
+       (acc #\newline)
+       (indent))
+      ((#\")
+       (set! k handle-string)
+       (acc ch))
+      (else
+       (acc ch))))
+
+  (define k main)
+  
+  (if (scheme-is-valid-json? obj)
+      (if (string? indent-string)
+	  (parameterize ((json-current-source-or-sink port-or-accumulator))
+	    (unsafe-write-json-scheme obj (lambda (ch) (k ch)))
+	    (acc #\newline))
+	  (error "Expected string" indent-string))
       (json-error "Write error, scheme object is not valid json" obj)))
 

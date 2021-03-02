@@ -10,6 +10,7 @@
 	  json-fold
 	  json-read
 	  json-accumulator
-	  json-write)
+	  json-write
+	  json-pretty-print)
   (import (gambit))
   (include "180.scm"))
